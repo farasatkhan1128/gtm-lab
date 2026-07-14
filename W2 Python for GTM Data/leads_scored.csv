@@ -1,0 +1,9 @@
+company_name,domain,industry,country,employees,icp_score,tier,reason
+Glow Beauty London,glowbeauty.co.uk,Beauty,United Kingdom,45,85,Tier 1,"UK market, target industry (beauty), suitable team size"
+Bright Smile Dental,brightsmile.co.uk,Dental,United Kingdom,23,55,Tier 2,"UK market, suitable team size"
+Alpine Wellness,alpinewellness.de,Wellness,Germany,30,30,Tier 3,suitable team size
+Fresh Hair Studio,freshhairstudio.co.uk,Hair Salon,United Kingdom,8,25,Tier 3,UK market
+Zen Clinic,zenclinic.co.uk,Med Spa,United Kingdom,12,25,Tier 3,UK market
+The Barber Room,thebarberroom.co.uk,Barber,United Kingdom,5,25,Tier 3,UK market
+Lux Aesthetics,luxaesthetics.co.uk,Aesthetics,United Kingdom,17,25,Tier 3,UK market
+Nordic Skin Co,nordicskin.se,Skincare,Sweden,9,0,Tier 3,
