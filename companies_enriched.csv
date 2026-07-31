@@ -1,0 +1,4 @@
+input,ok,company,industry,city,country,employees
+stripe.com,True,Stripe,Financial Software,San Francisco,United States,8000
+monzo.com,True,Monzo,Banking,London,United Kingdom,0
+canva.com,True,Canva,Design Software,Sydney,UNKNOWN,4000
