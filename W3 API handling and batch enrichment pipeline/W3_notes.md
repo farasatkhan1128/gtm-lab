@@ -1,38 +1,35 @@
-# Week 3 — APIs & Batch Enrichment (Revision Notes)
+# Week 3 — APIs, Batch Enrichment & the Weighted ICP Scorer (Revision Notes)
 
-**Goal of the week:** build a working enrichment pipeline in Python, one concept per day.
-By Friday: take a list of inputs → call an API for each → handle failures gracefully →
-pace the calls → split winners from rejects → write two clean CSV files to disk.
+**Goal of the week:** build a working enrichment + scoring pipeline in Python, one concept per day —
+then push scored accounts into n8n. By the end: take a list of inputs → call an API for each →
+handle failures gracefully → pace the calls → page through everything → shape it in pandas →
+score each company against a defensible ICP → POST the scored records into n8n.
 
-**Files built this week (in `W3/`):**
-`api_test.py` · `safe_fetch.py` · `batch_fetch.py` · `write_results.py` · `enrich_companies.py`
-plus outputs `posts_enriched.csv`, `posts_review.csv`, `companies_enriched.csv`, `companies_review.csv`.
+**Files built (in `W3/`):**
+`api_test.py` · `safe_fetch.py` · `batch_fetch.py` · `write_results.py` · `enrich_companies.py` ·
+`pagination.py` · `pandas_basics.py` · `icp_score.py`
+Outputs: `posts_enriched.csv`, `posts_review.csv`, `companies_enriched.csv`, `companies_review.csv`.
 
 **The one-line story of the week:** *A failed request never stops your script on its own — it hands
-you back a response object, and it's on you to inspect it before you trust it. Everything else this
-week is layers of "inspect before you trust" plus the plumbing to run that over a batch and save it.*
+you back a response object, and it's on you to inspect it before you trust it.* Everything else is
+layers of "inspect before you trust", the plumbing to run that over a batch, and then scoring + shipping.
 
 ---
+
+# PART 1 — APIs & Batch Enrichment
 
 ## The big idea: a failed request does NOT raise an error
 
-When you run `requests.get(url)` you always get a **response object** back — even on a 404 or 500.
-Python does not judge the response as good or bad; the status code is just *data inside* that object.
-Your script only crashes later, when you treat a failed response as if it held valid data
-(e.g. parsing an error page, or reaching for a field that isn't there).
-
-That is why the whole week is about **checking things before using them**.
-
----
+`requests.get(url)` always returns a **response object** — even on a 404 or 500. Python doesn't judge
+the response; the status code is just *data inside* it. Your script only crashes later, when you treat
+a failed response as valid (parsing an error page, or reaching for a field that isn't there). That's
+why the whole week is about **checking things before using them.**
 
 ## Monday — Live API calls
-
-- `requests.get(url)` makes a live call and returns a response object.
-- `response.status_code` → the HTTP result: **200** = success, **404** = not found, etc.
-- **GET** = "give me data" (read). **POST** = "here is data, do something with it" (create/send).
+- `requests.get(url)` makes a live call, returns a response object.
+- `response.status_code` → **200** success, **404** not found, etc.
+- **GET** = read data. **POST** = send/create data.
 - A 404 prints its status and the script keeps running — it does not stop by itself.
-
----
 
 ## Tuesday — Handling responses safely (`safe_fetch.py`)
 
@@ -41,23 +38,18 @@ That is why the whole week is about **checking things before using them**.
 | Layer | Catches | Tool |
 |---|---|---|
 | 1. Status check | Bad *envelope* — 404, 500, timeout | `response.ok` (or `status_code == 200`) |
-| 2. Parse guard | Good status but *unparseable body* (HTML/empty instead of JSON) | `try / except ValueError` around `.json()` |
-| 3. Field fallback | Parsed fine but a *field is missing* (even on a 200) | `.get(key, fallback)` |
+| 2. Parse guard | Good status but *unparseable body* | `try / except ValueError` around `.json()` |
+| 3. Field fallback | Parsed fine but a *field is missing* | `.get(key, fallback)` |
 
-**Key distinctions to remember:**
-
-- `response.ok` is `True` for any status **under 400** (all 2xx/3xx), `False` for 4xx/5xx.
-  More robust than `status_code == 200` because it also accepts 201, 204, etc.
-- `data['email']` raises **`KeyError`** if `email` is missing.
-  `data.get('email', 'N/A')` returns the fallback `'N/A'` instead — no crash.
-- `.json()` itself can crash if the body isn't valid JSON → raises `JSONDecodeError`,
-  which is a kind of **`ValueError`**, so `except ValueError` catches it.
-- **`raise_for_status()`** — the opposite of "skip quietly": it deliberately raises on a 4xx/5xx
-  so the script stops *loudly*. Use it when a call **must** succeed (e.g. downloading required data)
-  and a failure means nothing downstream can work.
-
-**Guard-clause structure** — check the bad cases first and `return` early, then do the real work
-flat at the bottom. Flatter and easier to read than deep nesting.
+**Key distinctions:**
+- `response.ok` is `True` for any status **under 400** (all 2xx/3xx) — more robust than `== 200`
+  because it also accepts 201, 204, etc.
+- `data['email']` raises **`KeyError`** if missing; `data.get('email', 'N/A')` returns the fallback.
+- `.json()` can crash on a non-JSON body → **`JSONDecodeError`**, which is a **`ValueError`**, so
+  `except ValueError` catches it.
+- **`raise_for_status()`** — deliberately raises on 4xx/5xx (loud failure). Use when a call *must*
+  succeed and a failure means nothing downstream can work.
+- **Guard clauses:** check bad cases first and `return` early, real work flat at the bottom.
 
 ```python
 import requests
@@ -65,342 +57,337 @@ import requests
 def fetch_post(post_id):
     url = f"https://jsonplaceholder.typicode.com/posts/{post_id}"
     response = requests.get(url)
-    print(f"Post {post_id} -> status {response.status_code}")
-
     if not response.ok:                       # 1. bad envelope -> bail
-        print(f"  Skipping — bad response, moving on")
-        return
-
-    try:                                      # 3. guard the parse itself
+        return None
+    try:                                      # 2. guard the parse
         data = response.json()
     except ValueError:
-        print("  Response wasn't valid JSON — skipping")
-        return
-
+        return None
     title = data.get('title', 'NO TITLE')     # 3. missing-field fallback
-    author = data.get('author', 'NO AUTHOR')
-    print(f"  Title: {title}")
-    print(f"  Author: {author}")
-
-fetch_post(1)
-fetch_post(9999)
+    return title
 ```
-
----
 
 ## Wednesday — Batch calls (`batch_fetch.py`)
 
-**Three parts:**
+1. **Return, don't print** — a batch function must `return` a structured result so the loop can
+   *collect* it. Printing throws it away.
+2. **Pace the calls** — `time.sleep()` between calls to avoid **429 Too Many Requests**. The sleep is a
+   dial tuned to the API's limit (too short = throttled, too long = job crawls).
+3. **Split into two streams** — tag each record with an `"ok"` flag; loop routes `True` → `results`,
+   `False` → `failures` (with a `reason`). Never silently drop a failure.
 
-1. **Return, don't print.** A batch function must **`return`** a structured result so the loop can
-   *collect* it. Printing just displays it and throws it away — nothing to save, score, or write.
-2. **Pace the calls.** Add `time.sleep()` between calls to avoid **429 Too Many Requests**
-   (the server rejecting you for going too fast). The sleep is a *dial*, tuned to the API's limit —
-   too short = throttled, too long = the job crawls.
-3. **Split into two streams.** Tag each returned record with an `"ok"` flag; the loop routes
-   `True` → `results`, `False` → `failures` (with a `reason`). Never silently drop a failure.
-
-**Key points:**
-
-- `results = []` and `failures = []` are created **before** the loop. If created *inside* it,
-  they'd reset every iteration and only the last item would survive.
-- `if record["ok"]:` reads the record's own verdict — cleaner and more informative than `is not None`.
-- Returning `{"ok": False, "reason": ...}` instead of a bare `None` means you know *why* it failed,
-  so you can log, review, or **retry** the specific failures.
-
-```python
-import requests
-import time
-
-def fetch_post(post_id):
-    url = f"https://jsonplaceholder.typicode.com/posts/{post_id}"
-    response = requests.get(url)
-
-    if not response.ok:
-        return {"id": post_id, "ok": False, "reason": f"status {response.status_code}"}
-    try:
-        data = response.json()
-    except ValueError:
-        return {"id": post_id, "ok": False, "reason": "invalid JSON"}
-
-    return {
-        "id": post_id, "ok": True,
-        "title": data.get("title", "NO TITLE"),
-        "author": data.get("author", "NO AUTHOR"),
-    }
-
-post_ids = [1, 2, 3, 9999]
-results, failures = [], []
-
-for post_id in post_ids:
-    print(f"Fetching post {post_id}...")
-    record = fetch_post(post_id)
-    if record["ok"]:
-        results.append(record)
-    else:
-        failures.append(record)
-    time.sleep(1)                 # pace the calls -> avoid 429
-
-print(f"\nBatch complete: {len(results)} succeeded, {len(failures)} failed, {len(post_ids)} total")
-```
-
----
+- `results = []` / `failures = []` go **before** the loop (inside, they'd reset each iteration).
+- `if record["ok"]:` reads the record's own verdict — cleaner than `is not None`.
+- Returning `{"ok": False, "reason": ...}` (not bare `None`) means you know *why* it failed → log,
+  review, or **retry**.
 
 ## Thursday — Writing results to CSV (`write_results.py`)
 
-**The persistence step.** A list of dicts in memory vanishes when the script ends. Writing it to a
-CSV makes it a real, openable, shareable file.
+The **persistence** step — a list of dicts vanishes when the script ends; a CSV is a real file.
 
-**Tools:**
-
-- `csv.DictWriter(f, fieldnames=...)` — purpose-built for writing a list of dictionaries.
-- `writeheader()` — writes the top row (the column names).
-- `writerows(list)` — writes one row per dict, matching each dict's keys to the fieldnames.
-
-**Gotchas / habits:**
-
-- Open in **`"w"` (write) mode** → creates the file, or **overwrites** it completely on each run.
-  (Run twice, you still get 3 rows, not 6.) Append mode is **`"a"`** — adds without erasing.
-- **`newline=""`** in `open()` — prevents the **Windows** double-line-ending bug that puts a blank
-  line between every data row. Always include it for CSV writing.
-- **Fieldnames must match the dict's keys.** Successes and failures have different shapes, so they
-  go to **different files** with **different fieldnames** (`posts_enriched.csv` vs `posts_review.csv`).
-- **DRY (Don't Repeat Yourself):** two near-identical write blocks → one reusable `write_csv()`
-  function called twice. One place to fix bugs, one place to change behaviour.
-- **Empty-list guard:** report "header only — no rows" instead of silently producing a header-only
-  file that looks broken.
+- `csv.DictWriter(f, fieldnames=...)` + `writeheader()` + `writerows(list)`.
+- Open in **`"w"` (write) mode** → creates or **overwrites** the file each run (run twice, still 3 rows,
+  not 6). Append mode is **`"a"`** (adds without erasing).
+- **`newline=""`** in `open()` — prevents the **Windows** blank-line-between-rows bug. Always include it.
+- **Fieldnames must match the dict's keys.** Successes and failures have different shapes → different
+  files (`posts_enriched.csv` vs `posts_review.csv`) with different fieldnames.
+- **DRY:** two near-identical write blocks → one reusable `write_csv()` function.
+- **Empty-list guard:** report "header only — no rows" instead of a silent header-only file.
 
 ```python
 import csv
-
 def write_csv(filename, rows, fieldnames):
     with open(filename, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    if len(rows) == 0:
-        print(f"  {filename}: header only — no rows to write")
-    else:
-        print(f"  Wrote {len(rows)} rows to {filename}")
-
-write_csv("posts_enriched.csv", results, ["id", "ok", "title", "author"])
-write_csv("posts_review.csv",  failures, ["id", "ok", "reason"])
+    print(f"  {filename}: header only — no rows" if len(rows)==0 else f"  Wrote {len(rows)} rows to {filename}")
 ```
-
----
 
 ## Friday — Full pipeline on company data (`enrich_companies.py`)
 
-**Consolidation day.** No new concepts — assemble the whole thing (fetch → handle → pace → split →
-write) on **company-shaped nested data**, the shape a real enrichment API (Apollo/Clearbit) returns.
+Consolidation: assemble fetch → handle → pace → split → write on **company-shaped nested data**.
 
-**The one real new technique: chained `.get()` for nested data.**
-
+**New technique — chained `.get()` for nested data:**
 ```python
 record.get("location", {}).get("city", "UNKNOWN")
 ```
+Get `location` (or `{}` if missing), then `city` out of that (or `"UNKNOWN"`). Digs into nested objects
+without a `KeyError` — exactly how you'd pull `employee_count` or an email from a real Apollo record.
 
-Read it as: get `location` (or an empty `{}` if missing), then get `city` out of that (or `"UNKNOWN"`
-if missing). This safely digs into nested objects without a `KeyError` when a level is absent —
-exactly how you'd pull `employee_count` or a specific email out of a real Apollo record that doesn't
-always have every field.
+**API-deprecation war story (most transferable lesson):** the planned live API (`restcountries.com/v3.1`)
+was **deprecated** — returned an error dict, so `data[0]` crashed with `KeyError: 0` (a *dict* indexed
+like a list). v5 now needs a key; a keyless alternative also missed. Debugging loop:
+> **crash → inspect the real response (`print(type(data))`, `print(data)`) → adjust → rerun**
 
-**The API-deprecation war story (the most transferable lesson of the week):**
-The planned live API (`restcountries.com/v3.1`) had been **deprecated** — it returned an error dict
-instead of data, so `data[0]` crashed with `KeyError: 0` (a *dict* being indexed like a list).
-v5 now needs an API key; a keyless alternative endpoint also missed. The disciplined debugging loop:
+For a consolidation day we swapped the live call for a **local dataset** (same nested shape). The
+**swap-point comment** marks where a real Apollo call (URL + auth header + status/JSON handling +
+rate limiting) would slot back in — the loop, split, pacing, and fallbacks stay identical.
 
-> **crash → inspect the *real* response (`print(type(data))`, `print(data)`) → adjust to fit → rerun**
-
-For a consolidation day, we swapped the live call for a **local dataset** (`COMPANY_DB`) that returns
-the same nested shape — isolating the pipeline skill from flaky endpoints. The **swap-point comment**
-marks where a real Apollo call would slot back in.
-
-**What would change to make it real (the swap point):**
-Replace the local `COMPANY_DB.get(domain)` lookup with `requests.get(...)` to the Apollo endpoint,
-plus an **auth header/API key**, status handling, JSON parsing, and rate limiting. The loop, split,
-pacing, and fallbacks stay identical.
-
-```python
-import time
-import csv
-
-COMPANY_DB = {
-    "stripe.com": {"name": "Stripe", "industry": "Financial Software",
-                   "location": {"city": "San Francisco", "country": "United States"}, "employees": 8000},
-    "monzo.com":  {"name": "Monzo", "industry": "Banking",
-                   "location": {"city": "London", "country": "United Kingdom"}},   # no 'employees'
-    "canva.com":  {"name": "Canva", "industry": "Design Software",
-                   "location": {"city": "Sydney"}, "employees": 4000},             # no 'country'
-}
-
-def enrich_company(domain):
-    # --- swap point: in production this is an Apollo/Clearbit GET by domain + API key ---
-    record = COMPANY_DB.get(domain)
-    if record is None:                                    # local twin of a 404 / no-match
-        return {"input": domain, "ok": False, "reason": "no match found"}
-    return {
-        "input": domain, "ok": True,
-        "company":   record.get("name", "UNKNOWN"),
-        "industry":  record.get("industry", "UNKNOWN"),
-        "city":      record.get("location", {}).get("city", "UNKNOWN"),      # nested .get()
-        "country":   record.get("location", {}).get("country", "UNKNOWN"),   # nested .get()
-        "employees": record.get("employees", 0),
-    }
-
-def write_csv(filename, rows, fieldnames):
-    with open(filename, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    if len(rows) == 0:
-        print(f"  {filename}: header only — no rows to write")
-    else:
-        print(f"  Wrote {len(rows)} rows to {filename}")
-
-inputs = ["stripe.com", "monzo.com", "canva.com", "notacompany.xyz"]
-results, failures = [], []
-
-for domain in inputs:
-    print(f"Enriching {domain}...")
-    record = enrich_company(domain)
-    if record["ok"]:
-        results.append(record)
-    else:
-        failures.append(record)
-    time.sleep(0.3)               # habit; in production this paces real API calls
-
-print(f"\nEnrichment complete: {len(results)} succeeded, {len(failures)} failed, {len(inputs)} total")
-
-write_csv("companies_enriched.csv", results,
-          ["input", "ok", "company", "industry", "city", "country", "employees"])
-write_csv("companies_review.csv", failures, ["input", "ok", "reason"])
-```
-
-**Result — `companies_enriched.csv` (fallbacks landed in the file):**
-```
-input,ok,company,industry,city,country,employees
-stripe.com,True,Stripe,Financial Software,San Francisco,United States,8000
-monzo.com,True,Monzo,Banking,London,United Kingdom,0          <- missing employees -> 0
-canva.com,True,Canva,Design Software,Sydney,UNKNOWN,4000      <- missing country  -> UNKNOWN
-```
+Result lands `companies_enriched.csv` + `companies_review.csv`; fallbacks (`0`, `UNKNOWN`) persist to disk.
 
 ---
 
-## Glossary (every term used this week)
+# PART 2 — Pandas & the Weighted ICP Scorer
 
-- **API** — a service you call over the internet to get or send data.
-- **`requests`** — the Python library for making HTTP calls (`requests.get`, `requests.post`).
-- **Response object** — what `requests.get()` returns; holds the status code and body. Always
-  returned, even on failure — it does not raise by itself.
-- **Status code** — the HTTP result. 200 OK, 201 Created, 204 No Content, 404 Not Found,
-  429 Too Many Requests, 500 Server Error.
-- **`response.ok`** — `True` for any status under 400; a robust "did it succeed?" check.
-- **`response.status_code`** — the raw number (e.g. 200, 404).
-- **`raise_for_status()`** — deliberately raises an error on a 4xx/5xx (loud failure on demand).
-- **`.json()`** — parses the response body from JSON text into a Python dict/list. Can raise
-  `JSONDecodeError` if the body isn't valid JSON.
-- **GET / POST** — GET reads data; POST sends/creates data.
-- **`KeyError`** — raised when you ask a **dict** for a key it doesn't have (`data['missing']`).
-- **`IndexError`** — raised when you ask a **list** for a position that doesn't exist (`data[99]`).
-- **`ValueError`** — a broad error type; `JSONDecodeError` is a kind of `ValueError`.
-- **`.get(key, fallback)`** — safe dict access: returns the value, or the fallback if the key is
-  missing, instead of crashing.
-- **`try / except`** — attempt risky code; if it raises the named error, run the `except` block
-  instead of crashing.
-- **`return`** — hands a value back from a function to the caller (so a loop can collect it).
-  Also used to bail out of a function early.
-- **`"ok"` flag** — a boolean field on each record marking success/failure, used to route it.
-- **`time.sleep(seconds)`** — pauses the program; used to pace API calls.
-- **429 / rate limit** — the server rejecting calls made too fast; fixed by pacing with `sleep`.
-- **`csv.DictWriter`** — writes a list of dicts to a CSV; needs `fieldnames`.
-- **`writeheader()` / `writerows()`** — write the column-name row / all the data rows.
-- **`"w"` / `"a"` mode** — write (overwrite) / append (add without erasing).
-- **`newline=""`** — stops the Windows blank-line-between-rows CSV bug.
-- **`fieldnames`** — the ordered list of column names; must match the dict's keys.
-- **`with open(...) as f:`** — opens a file and auto-closes it when the block ends.
-- **Guard clause** — check bad cases up front and `return` early; keeps the main logic flat.
-- **DRY** — "Don't Repeat Yourself"; pull repeated code into one reusable function.
-- **Nested `.get()` chain** — `x.get("a", {}).get("b", default)`; safely digs into nested dicts.
-- **Deprecated API** — a retired API version that stops returning real data; you migrate to a
-  new endpoint (a normal, recurring event in real GTM work).
+## Pagination — getting ALL the data (`pagination.py`)
+
+APIs hand back large results in **pages**. Read only page 1 and you silently miss the rest — a dangerous
+enrichment bug (nothing crashes).
+
+```python
+all_rows = []
+page = 1
+while True:                              # open-ended: page count unknown upfront
+    response = get_page(page)            # prod: requests.get(url, params={"page": page})
+    all_rows.extend(response["rows"])    # .extend adds every row into the master list
+    if not response["has_more"]:         # STOP CONDITION — the load-bearing line
+        break
+    page += 1
+    time.sleep(0.3)
+```
+- **`while True`** is deliberately infinite; **`break`** is the *only* exit. Remove the stop condition →
+  loops forever (hammers a real server).
+- **`.extend()`** unpacks a page's list; `.append()` would nest it as one item (wrong here).
+- Two styles: **page-number** (`?page=1,2,3…`) and **cursor/offset** (token points to next batch —
+  Apollo). Same loop shape.
+
+## Pandas — working with tables (`pandas_basics.py`)
+
+Manipulate a whole table at once, no row loops. `import pandas as pd`.
+Install: `pip install pandas` (or `python -m pip install pandas`).
+
+**GOTCHA (cost real time):** multiple Python versions → pandas installs in one, VS Code ▶ runs another →
+`ModuleNotFoundError`. Fix: `Ctrl+Shift+P` → **Python: Select Interpreter** → pick the one with pandas.
+Long-term fix = a **virtual environment** per project.
+
+### DataFrame — a table in Python
+`pd.DataFrame(list_of_dicts)` → each dict a row, each key a column.
+
+**Inspect any new dataset first:**
+```python
+df                    # whole table (auto-indexed)
+df.head(3)            # first 3 rows
+df.shape              # (rows, columns)
+df.columns.tolist()   # column names
+df.describe()         # count/mean/std/min/quartiles/max on NUMBER columns
+```
+`.describe()` quartiles (25/50/75%) show natural cut-points — evidence for *where to band*.
+
+### Filtering — keep rows matching a condition
+```python
+df[df["employees"] >= 3000]                                    # inner = boolean mask; df[...] keeps Trues
+df[df["industry"] == "Fintech"]                                # text filter, ==
+df[(df["industry"] == "Fintech") & (df["employees"] >= 2000)]  # TWO conditions
+len(df[df["country"] == "United States"])                      # len() to COUNT
+```
+**Two-condition rule:** use **`&`** (not `and`), wrap **each** condition in its own `( )`.
+
+### Grouping — collapse rows into per-category summaries
+```python
+df.groupby("industry").size()                # count per group
+df.groupby("industry")["employees"].mean()   # average a column per group
+df.groupby("country")["employees"].sum()     # total a column per group
+```
+Pattern: `df.groupby("SPLIT_BY")["MEASURE"].AGGREGATE()` (`size`/`mean`/`sum`/`max`/`min`).
+
+## The Weighted ICP Scorer (`icp_score.py`)
+
+**ICP score** = how well a company matches your Ideal Customer Profile → **score (0–100)**, **tier
+(A/B/C)**, **reason**. Sales works A-tier first.
+
+**The bar: you can defend EVERY weight.** Weights come from the ICP (imaginary: *a payments/financial-ops
+tool selling best to mid-to-large fintech & software in core English-speaking markets*).
+
+### Banding — number → category (check highest threshold first)
+```python
+def size_band(employees):
+    if employees >= 5000:   return "Enterprise"
+    elif employees >= 1000: return "Mid-market"   # already ruled out 5000+, so 1000–4999
+    else:                   return "Startup"
+```
+Test the boundaries (5000, 999, 1000) — where banding bugs hide.
+
+### The three scorers (return points)
+```python
+def industry_points(industry):          # strongest signal (0–40)
+    if industry == "Fintech":            return 40
+    elif industry in ("HR Software", "Software"): return 30
+    elif industry == "Design":           return 15
+    else:                                return 5
+
+def country_points(country):            # where we can sell (0–30)
+    if country in ("United States", "United Kingdom"): return 30
+    elif country in ("Australia", "Denmark", "Canada", "Germany", "Ireland"): return 15
+    else:                                return 5
+
+def size_points(employees):             # budget/seats (0–30)
+    band = size_band(employees)          # REUSES size_band — one source of truth
+    if band == "Enterprise":  return 30
+    elif band == "Mid-market": return 25
+    else:                      return 10
+```
+- **`in (tuple)`** = "is it any of these?" — cleaner than chained `or`.
+- **`size_points` reuses `size_band`** → change the Enterprise cutoff in one place (DRY).
+- **`else` = floor score** → unknown industry/country scores low, never crashes. Every company gets a score.
+
+### Assemble
+```python
+def score_company(company):
+    ind_pts  = industry_points(company["industry"])
+    ctry_pts = country_points(company["country"])
+    sz_pts   = size_points(company["employees"])
+    total = ind_pts + ctry_pts + sz_pts
+    if total >= 80:   tier = "A"
+    elif total >= 60: tier = "B"
+    else:             tier = "C"
+    band = size_band(company["employees"])
+    reason = (f"{company['industry']} ({ind_pts}) + "
+              f"{company['country']} ({ctry_pts}) + "
+              f"{band} ({sz_pts}) = {total}")
+    return {**company, "icp_score": total, "tier": tier, "reason": reason}
+```
+- **`{**company, ...}`** — dictionary unpacking; keep original fields, ADD new ones (enrichment).
+- **The `reason` string** is "defend every weight" made literal — carries the full arithmetic.
+
+**Worked results:**
+```
+Stripe | 100 | A | Fintech (40) + United States (30) + Enterprise (30) = 100   drop everything
+Pleo   |  65 | B | Fintech (40) + Denmark (15) + Startup (10) = 65             great industry, weak geo/size
+Figma  |  70 | B | Design (15) + United States (30) + Mid-market (25) = 70     good co, weak industry
+SomeCo |  20 | C | Retail (5) + Brazil (5) + Startup (10) = 20                 poor everywhere
+```
+Pleo & Figma both B — for *opposite* reasons; the reason string surfaces that.
+
+## Shipping — POST scored accounts into n8n
+
+First **POST** of the week (all week was GET). POST *sends* data.
+```python
+response = requests.post(N8N_WEBHOOK, json=scored)   # json= auto-converts dict + sets JSON header
+```
+Batch send reuses the whole toolkit: batch loop + `sleep` (Wed), `response.ok` + `try/except` (Tue),
+sent/failed counter (Thu).
+
+**n8n webhook — test vs production (key operational lesson):**
+- **Test URL** (`/webhook-test/lead-intake`): catches **ONE** request after "Listen for test event";
+  shows data live in the editor. Send 4 → only the first lands, rest 404.
+- **Production URL** (`/webhook/lead-intake`): listens **continuously** — but ONLY while the workflow is
+  **Published/Active**. Not published → every POST **404**, however correct the URL. (This cost a run.)
+- In this n8n build, **"Published"** (green dot) = active; there was no separate "Activate" toggle.
+
+**Result:** workflow Published + URL swapped to `/webhook/` → `4 sent, 0 failed`, four production
+executions. Python out → n8n in → loop closed.
+
+---
+
+## Glossary
+
+- **Response object** — what `requests.get/post` returns; holds status + body. Always returned, even on failure.
+- **Status code** — 200 OK, 201 Created, 204 No Content, 404 Not Found, 429 Too Many Requests, 500 Server Error.
+- **`response.ok`** — True for any status under 400.
+- **`raise_for_status()`** — raises on 4xx/5xx (loud failure on demand).
+- **`.json()`** — parse body to dict/list; can raise `JSONDecodeError` (a `ValueError`).
+- **GET / POST** — read / send data.
+- **`KeyError` / `IndexError` / `ValueError`** — missing dict key / missing list position / broad value error.
+- **`.get(key, fallback)`** — safe dict access with a default.
+- **`try / except`** — attempt risky code; run `except` on the named error instead of crashing.
+- **`"ok"` flag** — boolean field marking success/failure, used to route records.
+- **`time.sleep(s)` / 429** — pause between calls / "too many requests" rejection.
+- **`csv.DictWriter` / `writeheader` / `writerows`** — write dicts to CSV.
+- **`"w"` / `"a"`** — write (overwrite) / append.
+- **`newline=""`** — stops the Windows blank-line CSV bug.
+- **`with open(...) as f:`** — opens and auto-closes a file.
+- **Guard clause** — check bad cases up front and `return` early.
+- **DRY** — Don't Repeat Yourself; one reusable function.
+- **Chained `.get()`** — `x.get("a", {}).get("b", default)`; safe nested access.
+- **Deprecated API** — a retired version that stops returning data; you migrate endpoints.
+- **Pagination / `while True` / `break`** — retrieve results in pages; break is the only exit.
+- **`.extend()` vs `.append()`** — extend adds every item; append adds the list as one item.
+- **DataFrame / `pd.DataFrame(...)`** — a table (rows × named columns) from a list of dicts.
+- **`.head` / `.shape` / `.describe` / `.columns`** — inspect a DataFrame.
+- **Boolean mask** — True/False per row; `df[mask]` keeps the Trues.
+- **`&` filter rule** — join conditions with `&`, each in `( )`; not `and`.
+- **`groupby`** — split by category, then aggregate.
+- **Banding** — map a number to a category; check high threshold first.
+- **ICP score / tier / reason** — fit score, A/B/C bucket, human-readable breakdown.
+- **`in (tuple)`** — membership test; cleaner than chained `or`.
+- **`{**dict, ...}`** — dictionary unpacking (enrichment: keep + add fields).
+- **`requests.post(url, json=d)`** — send dict as JSON body; header auto-set.
+- **Test vs production webhook** — dev endpoint (catches one) vs live endpoint (continuous, only while Published).
 
 ---
 
 ## Quizzes (with answers)
 
-### Tuesday quiz — 6/6
-1. **500 from a down server — does Python raise on that line?** No. You get a response object with
-   `status_code = 500`; it doesn't raise by itself.
-2. **`data['email']` vs `data.get('email')` when `email` is missing?** Brackets raise `KeyError`;
-   `.get()` returns `None` (or a default if provided).
-3. **`data.get('phone', 'no phone')` when `phone` is missing?** Returns `"no phone"`.
-4. **What does `response.ok` give you over `status_code == 200`?** A simple True/False for success
-   (status under 400), instead of matching one exact code.
-5. **200, but `data = response.json()` still crashes — what and which guard?** Invalid JSON; caught by
-   `try/except` around `.json()`.
-6. **When use `raise_for_status()` to crash on purpose?** When the request *must* succeed (e.g.
-   downloading required data), so it stops immediately on a server error.
+### Tuesday — 6/6
+1. 500 from a down server, does Python raise on that line? **No — response object with `status_code=500`.**
+2. `data['email']` vs `data.get('email')` when missing? **`KeyError` vs `None`/default.**
+3. `data.get('phone', 'no phone')` when missing? **`"no phone"`.**
+4. `response.ok` over `== 200`? **True/False for any success (under 400).**
+5. 200 but `.json()` crashes — what/which guard? **Invalid JSON; `try/except` around `.json()`.**
+6. When `raise_for_status()`? **When the call must succeed, so it stops loudly on error.**
 
-### Wednesday quiz — 6/6
-1. **Why return a dict instead of print in a batch?** Returning lets the loop collect and reuse the
-   data; printing only displays it.
-2. **What if `results = []` is inside the loop?** It resets every iteration, so only the last result
-   is kept.
-3. **What is 429 and the one-line fix?** Too Many Requests (rate-limited); add `time.sleep(1)`.
-4. **Roughly how long does a 4-ID batch take with `sleep(1)`?** ~4 seconds — one sleep per call.
-5. **What does the `"reason"` field give you over `None`?** Why it failed, so you can log, review, or
-   retry specific failures.
-6. **500 Apollo enrich, 60 no-match — what does Part C hand you?** Two structured lists: successes and
-   failures-with-reasons — reviewable/retryable, not just printed and skipped.
+### Wednesday — 6/6
+1. Why return not print in a batch? **Returning lets the loop collect/reuse; print only displays.**
+2. `results=[]` inside the loop? **Resets each iteration, only last kept.**
+3. What is 429, fix? **Too many requests; `time.sleep(1)`.**
+4. Time for a 4-ID batch with `sleep(1)`? **~4s, one sleep per call.**
+5. `"reason"` over `None`? **Why it failed → log/review/retry.**
+6. 500 enrich, 60 no-match — what does the split hand you? **Two lists: successes + failures-with-reasons.**
 
-### Thursday quiz — 6/6
-1. **Why not 9–12 rows after multiple runs?** `"w"` overwrites the file at the start of each run.
-2. **`writeheader()` vs `writerows()`?** Writes the column names / writes all the data rows.
-3. **What does `newline=""` prevent, and on which OS?** Blank lines between rows, on Windows.
-4. **Why can't two differently-shaped files share fieldnames?** Their rows have different keys, so each
-   file needs matching fieldnames.
-5. **One benefit of `write_csv()` over copy-paste?** Update the logic in one place only (DRY).
-6. **Empty `failures` — what does the guard report and why useful?** "Header only — no rows"; clearer
-   than silently leaving a header-only file that looks like a bug. (Note: the file *is* still created.)
+### Thursday — 6/6
+1. Why not 9–12 rows after re-runs? **`"w"` overwrites each run.**
+2. `writeheader()` vs `writerows()`? **Column names / all data rows.**
+3. `newline=""` prevents what, which OS? **Blank lines between rows, Windows.**
+4. Why can't two shapes share fieldnames? **Different keys; each needs matching fieldnames.**
+5. `write_csv()` over copy-paste? **Update logic in one place (DRY).**
+6. Empty list — what does the guard report? **"Header only — no rows" (file still created).**
 
-### Week 3 wrap-up quiz — 10/10
-1. **404 back — does Python raise on that line? What do you hold?** No; a response object with
-   `status_code == 404`.
-2. **Three defensive layers and what each catches?** Status check → HTTP errors; `try/except` on
-   `.json()` → invalid JSON; `.get()` → missing dict fields.
-3. **`data['email']` vs `data.get('email', 'N/A')` when missing?** `KeyError` vs returns `"N/A"`.
-4. **Why `return` not `print()` in a batch function?** `return` gives the result to the loop to store
-   and process; `print()` only displays it.
-5. **What is 429 and the one line to avoid it?** Too many requests; add `time.sleep(1)`.
-6. **What does the loop do with the `"ok"` flag?** Sends `True` records to `results`, `False` to
-   `failures`.
-7. **`"w"` mode on re-run?** Erases the existing file before writing new contents.
-8. **Why can't `posts_enriched.csv` and `posts_review.csv` share fieldnames?** Different keys per row,
-   so each needs matching fieldnames.
-9. **Canva → `Sydney, UNKNOWN` without crashing — technique and why it matters?** `.get()` with
-   fallbacks replaces missing values; real Apollo records often have incomplete fields.
-10. **Which line marks where a real Apollo call slots in, and what changes?** The local lookup line;
-    replace it with `requests.get(...)` plus auth, status handling, JSON parsing, and rate limiting.
+### Week 3 (Part 1) wrap-up — 10/10
+1. 404 back — raise? what do you hold? **No; response object, `status_code==404`.**
+2. Three defensive layers? **Status check / `try-except` on `.json()` / `.get()` fallback.**
+3. `['email']` vs `.get('email','N/A')`? **`KeyError` vs `"N/A"`.**
+4. Why `return` not `print` in a batch? **`return` gives it to the loop; print only shows.**
+5. 429 + one line? **Too many requests; `time.sleep(1)`.**
+6. What does the loop do with `"ok"`? **True→results, False→failures.**
+7. `"w"` on re-run? **Erases the file first.**
+8. Why can't the two files share fieldnames? **Different keys per row.**
+9. `Sydney, UNKNOWN` without crashing — technique/why? **`.get()` fallbacks; Apollo records often incomplete.**
+10. Line marking the Apollo swap + what changes? **The local lookup line; add `requests.get`, auth, status/JSON handling, rate limiting.**
+
+### Pandas + ICP + n8n wrap-up — 9.5/10
+1. Page 1 only — why dangerous? **You miss the rest of the data.**
+2. What stops a `while True` pagination loop? **`if not has_more: break`; remove it → infinite.**
+3. `pd.DataFrame(list_of_dicts)` turns dict/key into? **Row / column.**
+4. Inner vs outer of `df[df["employees"]>5000]`? **Inner = mask; outer keeps Trues.**
+5. Two-condition filter symbol + wrapping? **`&`, each in parentheses.**
+6. Read `df.groupby("industry")["employees"].mean()`. **Average employees per industry.**
+7. Why highest-threshold-first in banding? **Or a big value matches a lower band → wrong label.**
+8. Why `size_points` reuses `size_band`? **No duplicated thresholds; one place to maintain (DRY).**
+9. Why does the `reason` string matter? **Shows the calc → explainable/verifiable (defend every weight).**
+10. `0 sent/4 failed` → `4 sent/0 failed`, what changed? **PUBLISHED the workflow — the production URL
+    404s until the workflow is active, however correct the URL.** *(The fix was activation, not the URL.)*
 
 ---
 
 ## Interview framing (bank this)
 
-> *"I built a batch enrichment pipeline in Python — it takes a list of company domains, calls an
-> enrichment API for each with graceful handling of failures and missing fields, paces the calls to
-> respect rate limits, and outputs a clean enriched file plus a review file of records that need
-> attention."*
+> *"I built a batch enrichment pipeline and a weighted ICP scoring engine in Python. The pipeline takes
+> a list of company domains, calls an API for each with graceful handling of failures, missing fields,
+> pagination, and rate limits, and outputs clean enriched + review files. The scorer rates each company
+> on industry fit, market, and size band — every weight chosen from the ICP, each score carrying a
+> reason string — then POSTs the scored accounts into an n8n workflow via webhook. I can defend every
+> weight."*
 
-Every clause is something you did and understand line by line.
-
-**Core habit of the week:** *never silently drop a failure — route it somewhere reviewable, with a
-reason.*
+**Core habits:** never silently drop a failure (route it, with a reason); one source of truth (reuse
+`size_band`); defend every weight; verify state before assuming (the API-deprecation and
+"Published-vs-Active" webhook debugging).
 
 ---
 
-## What's next — Week 4
-
-**pandas** — the library that turns row-by-row CSV work into fast table operations (filter, sort,
-group, merge). It sits under every serious GTM data workflow and will supercharge both Week 2's
-`clean_leads.py` and this week's enrichment output.
+## Week 3 — fully complete ✅
+APIs & failure handling · batching + pacing · pagination · CSV persistence · pandas
+(inspect/filter/group/band) · weighted ICP scorer (score/tier/reason) · batch POST into n8n
+(4 landed in production). **Next: Week 4 (fresh thread)** — likely deeper pandas (merging enrichment
+back onto lead lists) and beyond. Consider setting up a **virtual environment** first to fix the
+multiple-Python-versions issue cleanly.

@@ -46,3 +46,11 @@ print("@" in phone)  # True
 
 phone1 = "+441234567890"
 print(phone1[3:])
+
+
+
+
+X= "32"
+print(type(X))  # <class 'str'>
+x = int(X)
+print(x * 3) # 96
