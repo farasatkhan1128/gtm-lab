@@ -1,0 +1,28 @@
+services:
+
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  gtm-service:
+    build: .
+    container_name: gtm-service
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - OLLAMA_URL=http://host.docker.internal:11434/api/generate
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  n8n_data:
+    external: true
