@@ -1,7 +1,5 @@
-# D:\gtm-lab\W5 Full Pipeline Integration\service.py
+# D:\gtm-lab\W6 Hardening Real Self-Hosting\service.py
 import sys, os, csv
-sys.path.insert(0, r"D:\gtm-lab\W3 API handling and batch enrichment pipeline")
-sys.path.insert(0, r"D:\gtm-lab\W4 Local AI with Ollama")
 
 from flask import Flask, request, jsonify
 from icp_score import score_company      # (company) -> ?  the run will show us
@@ -9,8 +7,16 @@ from validated import get_validated      # (company, industry) -> ?  the run wil
 
 app = Flask(__name__)
 
+WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
+
+def check_token(req):
+    token = req.headers.get("X-Webhook-Token", "")
+    return token == WEBHOOK_TOKEN
+
 @app.post("/process")
 def process():
+    if not check_token(request):
+        return jsonify({"error": "Unauthorised"}), 401
     lead = request.get_json(force=True)
 
     # n8n may wrap the real lead under "body" — unwrap if so
@@ -44,4 +50,4 @@ def commit():
     return jsonify({"written": True}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)   # 0.0.0.0 so the Docker container can reach it
+    app.run(host="0.0.0.0", port=5000)
