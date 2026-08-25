@@ -1,10 +1,9 @@
-import requests
+import requests, json, os
 import json
 
 def get_structured(company, industry, model="llama3.2:3b"):
     """Ask the model for structured JSON about a company. Returns a Python dict."""
-    url = "http://localhost:11434/api/generate"
-
+    url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
     prompt = f"""You are a B2B sales research assistant.
 For the company below, return ONLY a JSON object with exactly these three keys:
 - "summary": one sentence describing what the company likely does
@@ -24,7 +23,7 @@ Industry: {industry}"""
         }
     }
 
-    response = requests.post(url, json=payload, timeout=120)
+    response = requests.post(url, json=payload, timeout=15)
     response.raise_for_status()
     data = response.json()
 
